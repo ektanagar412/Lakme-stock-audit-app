@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1a56db">
+  <title>Stock Audit</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      background: #f3f4f6;
+    }
+
+    header {
+      background: #1a56db;
+      color: #fff;
+      padding: 10px 12px;
+    }
+
+    header .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    header button {
+      flex: 1;
+      padding: 8px;
+      font-size: 13px;
+      background: #fff;
+      color: #1a56db;
+      border: 0;
+      border-radius: 6px;
+    }
+
+    main {
+      padding: 16px;
+      max-width: 480px;
+      margin: auto;
+    }
+
+    #reader {
+      width: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      margin-top: 4px;
+    }
+
+    input[readonly] {
+      background: #e5e7eb;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      font-size: 16px;
+      border: 0;
+      border-radius: 6px;
+      margin-top: 16px;
+      background: #1a56db;
+      color: #fff;
+    }
+
+    .btn.secondary {
+      background: #6b7280;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    #msg {
+      margin-top: 12px;
+      font-weight: 600;
+    }
+
+    .ok {
+      color: #047857;
+    }
+
+    .err {
+      color: #b91c1c;
+    }
+
+    .batch {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      margin-top: 8px;
+    }
+
+    .batch label {
+      margin-top: 0;
+    }
+
+    .batch .x {
+      background: #b91c1c;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      padding: 12px 14px;
+      font-size: 16px;
+    }
+
+    #totalRow {
+      margin-top: 12px;
+      font-size: 16px;
+    }
+
+    .item {
+      background: #fff;
+      padding: 10px;
+      border-radius: 6px;
+      margin-top: 8px;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .item button {
+      border: 0;
+      border-radius: 4px;
+      padding: 6px 10px;
+      color: #fff;
+      background: #1a56db;
+    }
+
+    .item button.del {
+      background: #b91c1c;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <strong>Stock Audit</strong> <span id="stats" style="float:right;font-size:13px"></span>
+    <div class="row">
+      <button id="importBtn">Import products</button>
+      <button id="listBtn">Entries</button>
+      <button id="exportBtn">Export Excel</button>
+    </div>
+  </header>
+  <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" class="hidden">
+
+  <main>
+    <div id="scanView">
+      <div id="reader"></div>
+      <label>Or type product code <input id="manualCode" placeholder="Product code"></label>
+      <button class="btn secondary" id="manualBtn">Use this code</button>
+    </div>
+
+    <div id="formView" class="hidden">
+      <label>Product code <input id="code" readonly></label>
+      <label>Product name <input id="name"></label>
+      <div id="batches"></div>
+      <button class="btn secondary" id="addBatchBtn" style="margin-top:10px">+ Add another expiry</button>
+      <div id="totalRow">Total: <b id="total">0</b></div>
+      <button class="btn" id="saveBtn">Save &amp; scan next</button>
+      <button class="btn secondary" id="cancelBtn">Cancel</button>
+    </div>
+
+    <div id="listView" class="hidden">
+      <button class="btn secondary" id="backBtn" style="margin-top:0">← Back to scanning</button>
+      <div id="items"></div>
+    </div>
+    <div id="msg"></div>
+  </main>
+
+  <script src="lib/html5-qrcode.min.js"></script>
+  <script src="lib/xlsx.full.min.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } };
+    const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+    // ---- data model ----
+    // products: { code: name }
+    // entries:  [{ ts, code, name, batches: [{ expiry: "YYYY-MM-DD" | "", qty: number }] }]  (one entry per product)
+    function mergeBatches(bs) {
+      const m = new Map();
+      bs.forEach(b => m.set(b.expiry || "", (m.get(b.expiry || "") || 0) + Number(b.qty || 0)));
+      return [...m].map(([expiry, qty]) => ({ expiry, qty }))
+        .sort((a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999"));
+    }
+    function migrate(list) {   // converts older flat entries (qty/expiry) to the batch format
+      const out = [];
+      list.forEach(e => {
+        const batches = e.batches || [{ expiry: e.expiry || "", qty: Number(e.qty) || 0 }];
+        const ex = out.find(x => x.code === e.code);
+        if (ex) ex.batches.push(...batches); else out.push({ ts: e.ts, code: e.code, name: e.name, batches });
+      });
+      out.forEach(e => e.batches = mergeBatches(e.batches));
+      return out;
+    }
+    const totalOf = e => e.batches.reduce((s, b) => s + b.qty, 0);
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const fmtDate = d => d ? d.split("-").reverse().join("-") : "";   // 2026-12-31 -> 31-12-2026
+
+    let products = load("products", {});
+    let entries = migrate(load("entries", []));
+    let scanner = null;
+
+    function msg(t, c) { $("msg").textContent = t; $("msg").className = c || ""; }
+    function stats() { $("stats").textContent = `${Object.keys(products).length} products · ${entries.length} audited`; }
+    function show(view) { ["scanView", "formView", "listView"].forEach(v => $(v).classList.toggle("hidden", v !== view)); }
+
+    // ---- scanner ----
+    async function startScanner() {
+      show("scanView");
+      scanner = new Html5Qrcode("reader");
+      try {
+        await scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, async text => {
+          await stopScanner();
+          showForm(text.trim());
+        });
+      } catch (e) { msg("Camera unavailable: " + e, "err"); }
+    }
+    async function stopScanner() {
+      if (scanner) { try { await scanner.stop(); } catch (e) { } scanner = null; }
+    }
+
+    // ---- form with multiple expiry batches ----
+    function updateTotal() {
+      let t = 0;
+      document.querySelectorAll("#batches .bQty").forEach(i => t += Number(i.value || 0));
+      $("total").textContent = t;
+    }
+    function addBatch(expiry = "", qty = "") {
+      const d = document.createElement("div"); d.className = "batch";
+      d.innerHTML = `<div style="flex:1"><label>Expiry<input type="date" class="bExp"></label></div>
+    <div style="flex:1"><label>Qty<input type="number" inputmode="numeric" min="0" class="bQty"></label></div>
+    <button type="button" class="x">✕</button>`;
+      d.querySelector(".bExp").value = expiry;
+      d.querySelector(".bQty").value = qty;
+      d.querySelector(".bQty").oninput = updateTotal;
+      d.querySelector(".x").onclick = () => { d.remove(); updateTotal(); };
+      $("batches").appendChild(d);
+      updateTotal();
+    }
+    $("addBatchBtn").onclick = () => addBatch();
+
+    function showForm(code) {
+      show("formView");
+      const ex = entries.find(e => e.code === code);
+      $("code").value = code;
+      $("name").value = ex ? ex.name : (products[code] || "");
+      $("batches").innerHTML = "";
+      if (ex) ex.batches.forEach(b => addBatch(b.expiry, b.qty)); else addBatch();
+      if (ex) msg("Already audited – you are editing the existing entry.", "ok");
+      else if (products[code]) msg("");
+      else msg("Code not in product list – enter name manually.", "err");
+      const q = document.querySelector("#batches .bQty"); if (q) q.focus();
+    }
+
+    $("manualBtn").onclick = async () => {
+      const c = $("manualCode").value.trim(); if (!c) return;
+      await stopScanner(); $("manualCode").value = ""; showForm(c);
+    };
+    $("cancelBtn").onclick = () => { msg(""); startScanner(); };
+
+    $("saveBtn").onclick = () => {
+      const name = $("name").value.trim();
+      const rows = [...document.querySelectorAll("#batches .batch")]
+        .map(d => ({ expiry: d.querySelector(".bExp").value, qty: d.querySelector(".bQty").value }))
+        .filter(b => b.qty !== "")
+        .map(b => ({ expiry: b.expiry, qty: Number(b.qty) }));
+      if (!name) { msg("Product name is required.", "err"); return; }
+      if (!rows.length) { msg("Enter at least one quantity.", "err"); return; }
+      const entry = {
+        ts: new Date().toISOString().replace("T", " ").slice(0, 19),
+        code: $("code").value, name, batches: mergeBatches(rows)
+      };
+      const i = entries.findIndex(e => e.code === entry.code);
+      if (i >= 0) entries[i] = entry; else entries.push(entry);
+      save("entries", entries); stats();
+      msg(`Saved ✓ (${entry.code}, total ${totalOf(entry)})`, "ok");
+      startScanner();
+    };
+
+    // ---- entries list ----
+    $("listBtn").onclick = async () => { await stopScanner(); show("listView"); renderList(); };
+    $("backBtn").onclick = () => { msg(""); startScanner(); };
+
+    function renderList() {
+      const box = $("items"); box.innerHTML = "";
+      if (!entries.length) { box.textContent = "No entries yet."; return; }
+      entries.slice().reverse().forEach(e => {
+        const d = document.createElement("div"); d.className = "item";
+        const exp = e.batches.map(b => `${fmtDate(b.expiry) || "no expiry"}: ${b.qty}`).join(" · ");
+        d.innerHTML = `<div><b>${esc(e.name)}</b><br>${esc(e.code)} · Total ${totalOf(e)}<br><small>${esc(exp)}</small></div>`;
+        const actions = document.createElement("div");
+        const edit = document.createElement("button"); edit.textContent = "Edit";
+        edit.onclick = () => showForm(e.code);
+        const del = document.createElement("button"); del.textContent = "Delete"; del.className = "del"; del.style.marginLeft = "6px";
+        del.onclick = () => {
+          if (confirm("Delete this product's entry?")) {
+            entries = entries.filter(x => x.code !== e.code); save("entries", entries); stats(); renderList();
+          }
+        };
+        actions.append(edit, del); d.appendChild(actions); box.appendChild(d);
+      });
+    }
+
+    // ---- import product master (finds the "Product code" / "Product name" header row) ----
+    $("importBtn").onclick = () => $("fileInput").click();
+    $("fileInput").onchange = async ev => {
+      const f = ev.target.files[0]; if (!f) return;
+      try {
+        const wb = XLSX.read(await f.arrayBuffer(), { type: "array" });
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" });
+        const norm = v => String(v).trim().toLowerCase();
+        const h = rows.findIndex(r => r.some(c => norm(c) === "product code") && r.some(c => norm(c) === "product name"));
+        let ci = 0, ni = 1, start = 1;   // fallback: column A = code, column B = name, row 1 = header
+        if (h >= 0) {
+          ci = rows[h].findIndex(c => norm(c) === "product code");
+          ni = rows[h].findIndex(c => norm(c) === "product name");
+          start = h + 1;
+        }
+        const map = {};
+        rows.slice(start).forEach(r => {
+          const code = String(r[ci] ?? "").trim();
+          if (code && !(code in map)) map[code] = String(r[ni] ?? "").trim();
+        });
+        products = map; save("products", products); stats();
+        msg(`Imported ${Object.keys(map).length} products ✓`, "ok");
+      } catch (e) { msg("Import failed: " + e.message, "err"); }
+      ev.target.value = "";
+    };
+
+    // ---- export: Sr. No. | Product code | Product Name | No. of Total | Expiry-1 | No. of Items | Expiry-2 | ... ----
+    $("exportBtn").onclick = async () => {
+      if (!entries.length) { msg("Nothing to export yet.", "err"); return; }
+      const maxB = Math.max(3, ...entries.map(e => e.batches.length));
+      const cols = 4 + maxB * 2;
+      const pad = a => a.concat(Array(cols - a.length).fill(""));
+
+      const head1 = pad(["Sr. No.", "Product code", "Product Name", "No. of Total", "Expiry"]);
+      const exp = [];
+      for (let i = 1; i <= maxB; i++) exp.push(`Expiry-${i}`, "No. of Items");
+      const head2 = pad(["", "", "", ""].concat(exp));
+
+      const body = entries.map((e, i) => {
+        const r = [i + 1, e.code, e.name, totalOf(e)];
+        for (let k = 0; k < maxB; k++) {
+          const b = e.batches[k];
+          r.push(b ? fmtDate(b.expiry) : "", b ? b.qty : "");
+        }
+        return r;
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet([head1, head2, ...body]);
+      ws["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }, { s: { r: 0, c: 1 }, e: { r: 1, c: 1 } },
+        { s: { r: 0, c: 2 }, e: { r: 1, c: 2 } }, { s: { r: 0, c: 3 }, e: { r: 1, c: 3 } },
+        { s: { r: 0, c: 4 }, e: { r: 0, c: cols - 1 } }
+      ];
+      ws["!cols"] = [{ wch: 7 }, { wch: 14 }, { wch: 45 }, { wch: 13 }, ...Array(maxB * 2).fill({ wch: 13 })];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Stock Audit");
+      const fname = `stock-audit-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      try {
+        XLSX.writeFile(wb, fname);
+        msg("Exported " + fname, "ok");
+      } catch (e) { msg("Export problem: " + (e.message || e), "err"); }
+    };
+
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+    stats();
+    startScanner();
+  </script>
+</body>
+
+</html>
